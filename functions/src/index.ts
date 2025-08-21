@@ -8,6 +8,9 @@ import { applyIntent, startGame } from "./engine/reducer.js";
 import { aiTakeTurn } from "./engine/ai.js";
 import type { GameState, Action } from "./engine/types.js";
 import { parseLineToIntent } from "./ai/nlp.js";
+import { routeUserText } from "./ai/router.js";
+import { DualRaidAdapter } from "./engine/dualraid/adapter.js";
+import { routeUserText2 } from "./ai/router2.js";
 
 initializeApp();
 const db = getFirestore();
@@ -178,4 +181,74 @@ export const chatCommandFn = onCall(async (req) => {
   }
 
   return { ok: true, intent: parsed.intent, explain: parsed.explain || null };
+});
+
+export const chatRouterFn = onCall(async (req) => {
+  const { gameId, text } = req.data as { gameId: string; text: string };
+  if (!gameId || !text) throw new Error("bad_request");
+
+  const uid = req.auth?.uid || "anon";
+  const refI = db.doc(`games/${gameId}/internal/state`);
+  const refP = db.doc(`games/${gameId}/public/state`);
+  const refM = db.doc(`games/${gameId}/meta/info`);
+  const chatCol = db.collection(`games/${gameId}/chat`);
+
+  // ユーザ発話を保存
+  await chatCol.add({ role:"user", uid, text, at: Date.now() });
+
+  // 今は dualraid 固定（後で meta.rulepack で切替）
+  const routed = await routeUserText2({ gameId, seat:"P1", adapter: DualRaidAdapter }, text);
+
+  // 会話返信
+  if (routed.reply) await chatCol.add({ role:"opponent", text: routed.reply, at: Date.now() });
+  else if (routed.kind==="unknown" && routed.ask) await chatCol.add({ role:"system", text: routed.ask, at: Date.now() });
+
+  // 盤面適用
+  let shouldAIMove = false;
+  if (routed.actions && (routed.kind==="game_action" || routed.kind==="both")) {
+    const actions = routed.actions as Action[];
+
+    await db.runTransaction(async (tx)=>{
+      const snap = await tx.get(refI);
+      if (!snap.exists) throw new Error("game_not_found");
+      const gs = snap.data() as GameState;
+
+      gs.log = gs.log || [];
+      gs.log.push({ t:"nlp", text, parsed: actions, explain: routed.explain||null, at: Date.now() });
+
+      const after = DualRaidAdapter.validateAndApply(gs, "P1", actions);
+      const active = (after as any).status ? (after as any).status === "active" : true;
+      shouldAIMove = after.turn === "P2" && active;
+
+      // 保存（公開へ投影）
+      const c:any = JSON.parse(JSON.stringify(after));
+      const hide = (s:any)=>{ s.handCount=s.hand?.length??0; s.deckCount=s.deck?.length??0; delete s.hand; delete s.deck; };
+      hide(c.p1); hide(c.p2);
+
+      tx.set(refI, after);
+      tx.set(refP, c);
+
+      // P1 private（手札実体）
+      const metaSnap = await tx.get(refM);
+      const p1_uid = metaSnap.exists ? (metaSnap.data() as any).p1_uid : null;
+      if (p1_uid) tx.set(db.doc(`games/${gameId}/private/${p1_uid}`), { hand: after.p1.hand, deckCount: after.p1.deck.length });
+    });
+  }
+
+  // 必要ならAIの自動手番（これは従来どおり）
+  if (shouldAIMove) {
+    await db.runTransaction(async (tx)=>{
+      const snap = await tx.get(refI);
+      if (!snap.exists) return;
+      const gs = snap.data() as GameState;
+      const after = aiTakeTurn(gs, "P2");
+      const c:any = JSON.parse(JSON.stringify(after));
+      const hide = (s:any)=>{ s.handCount=s.hand?.length??0; s.deckCount=s.deck?.length??0; delete s.hand; delete s.deck; };
+      hide(c.p1); hide(c.p2);
+      tx.set(refI, after);
+      tx.set(refP, c);
+    });
+  }
+
+  return { ok:true, routed: routed.kind };
 });
