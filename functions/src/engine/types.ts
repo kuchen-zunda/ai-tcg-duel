@@ -4,7 +4,8 @@ export type Action =
   | { type: "use_action"; unit: string; action: string; target?: string }
   | { type: "play_support"; card: string; mode: "adventurer" | "boss"; target?: string }
   | { type: "play_field"; card: string; side: "adventurer" | "boss" }
-  | { type: "equip"; card: string; target: string }
+  | { type: "equip"; card: string; unit: string }              // ← unit に統一
+  | { type: "play_event"; card: string }                        // ← 追加
   | { type: "end_turn" };
 export interface Adventurer { id: Id; name: string; hp: number; maxHp: number; atk: number; ap: number; maxAp: number; statuses: string[]; equipment: Id[]; }
 export interface Boss { id: Id; name: string; hp: number; maxHp: number; stash?: { nextTurnDamageUp?: number; nextDiceMod?: number }; }

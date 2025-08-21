@@ -13,17 +13,7 @@ export function draw(gs:GameState, a:"P1"|"P2", n:number){
   for(let i=0;i<n;i++){ const c = s.deck.shift(); if(c) s.hand.push(c); }
 }
 
-function checkWin(gs: GameState, actor: "P1"|"P2"){
-  const me = meOf(gs, actor), opp = opOf(gs, actor);
-  const meDead  = me.boss.hp <= 0;
-  const oppDead = opp.boss.hp <= 0;
-  if (meDead && oppDead) gs.status = "draw";
-  else if (oppDead)      gs.status = (actor === "P1") ? "p1_win" : "p2_win";
-  else if (meDead)       gs.status = (actor === "P1") ? "p2_win" : "p1_win";
-}
-
 export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameState{
-  if (gs.status && gs.status !== "active") throw new Error("game_over"); // ← 追加
   const v = softValidate(gs, actor, act); if(!v.ok) throw new Error(v.reason);
   const me = meOf(gs,actor), enemy = opOf(gs,actor);
 
@@ -35,38 +25,69 @@ export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameSt
       if (!a) throw new Error("action_not_found");
       if ((a.cost_ap||0) > unit.ap) throw new Error("ap_not_enough");
       unit.ap -= (a.cost_ap||0);
-      if (a.type==="attack"){ dealDamageToBoss(enemy, a.damage||0); }
-      else if (a.type==="attack_boss_only"){ dealDamageToBoss(enemy, a.damage||0); }
+
+      if (a.type==="attack" || a.type==="attack_boss_only"){ dealDamageToBoss(enemy, a.damage||0); }
       else if (a.type==="aoe_attack"){ for(const e of enemy.adv.filter((x:any)=>x.hp>0)) dealDamageToAdventurer(e, a.damage||0); }
       else if (a.type==="heal"){ const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0]; if (tgt) healAdventurer(tgt, a.heal||0); }
-      checkWin(gs, actor);
+
+      gs.log.push({ t:"act", actor, unit:unit.name, action:a.name, at:Date.now() });
       break;
     }
     case "play_support": {
       const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
       me.flags.supportUsedThisTurn = true;
+
       if (act.card==="絆の記録"){
         const fallen = me.adv.filter((x:any)=>x.hp<=0).length;
         const drawN = Math.min(fallen, 2);
         for (let i=0;i<drawN;i++){ const c = me.deck.shift(); if(c) me.hand.push(c); }
       }
+      // 他のサポート効果は必要に応じてここに追加
+      gs.log.push({ t:"support", actor, card:act.card, mode:act.mode, target:act.target||null, at:Date.now() });
       break;
     }
     case "play_field": {
       if (act.side==="boss") me.fieldBoss = act.card; else me.fieldAdv = act.card;
       const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
+      gs.log.push({ t:"field", actor, card:act.card, side:act.side, at:Date.now() });
       break;
     }
-    case "equip": { break; }
+    case "equip": {
+      const unit = me.adv.find((u:any)=>u.name===act.unit);   // ← unit
+      if (!unit) throw new Error("unit_not_found");
+      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
+      unit.equipment = unit.equipment || [];
+      unit.equipment.push(act.card);
+
+      // 代表的な修正（dataset側に値があれば適用）
+      const eq:any = dataset.cards.equipment.find((e:any)=>e.name===act.card);
+      if (eq?.atk_plus)   unit.atk   = (unit.atk||0) + eq.atk_plus;
+      if (eq?.max_ap_plus)unit.maxAp = (unit.maxAp||0) + eq.max_ap_plus;
+
+      gs.log.push({ t:"equip", actor, unit:unit.name, card:act.card, at:Date.now() });
+      break;
+    }
+    case "play_event": {
+      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
+      const ev:any = dataset.cards.events.find((e:any)=>e.name===act.card);
+
+      if (ev?.effect==="draw_if_fallen"){
+        const fallen = me.adv.filter((x:any)=>x.hp<=0).length;
+        const drawN = Math.min(fallen, 2);
+        for (let i=0;i<drawN;i++){ const c = me.deck.shift(); if(c) me.hand.push(c); }
+      }
+      // 他のイベント効果は必要に応じて追加
+      gs.log.push({ t:"event", actor, card:act.card, at:Date.now() });
+      break;
+    }
     case "end_turn": {
       for (const u of me.adv) u.ap = Math.min(u.maxAp, u.ap + 1);
-      resolveBossAction(gs, actor);
-      checkWin(gs, actor);
-      if (gs.status === "active") {                      // ← 終了時はターンを回さない
-        gs.turn = actor==="P1" ? "P2" : "P1";
-        const nxt = meOf(gs, gs.turn);
-        nxt.flags.supportUsedThisTurn = false;
-      }
+      const res = resolveBossAction(gs, actor);
+      if (res) gs.log.push({ t:"boss_roll", actor, boss: me.boss.name, die:res.die, action:res.action, val:res.value, targets:res.targets||[], at:Date.now() });
+
+      gs.turn = actor==="P1" ? "P2" : "P1";
+      const nxt = meOf(gs, gs.turn);
+      nxt.flags.supportUsedThisTurn = false;
       break;
     }
   }
@@ -85,12 +106,12 @@ export function startGame(seed:string, boss1:string, boss2:string): GameState{
       ...dataset.cards.fields.map((f:any)=>f.name),
     ];
     shuffle(deck);
-    return { boss:{id:bc.id, name:bc.name, hp:bc.hp, maxHp:bc.hp}, adv, hand:[], deck, discard:[], fieldBoss: null, fieldAdv: null, flags:{supportUsedThisTurn:false} };
+    return { boss:{id:bc.id, name:bc.name, hp:bc.hp, maxHp:bc.hp}, adv, hand:[], deck, discard:[], fieldBoss:null, fieldAdv:null, flags:{supportUsedThisTurn:false} };
   }
   const gs:GameState = {
     id: "g_"+Math.random().toString(36).slice(2,10),
     turn:"P1", phase:"draw",
-    status:"active",
+    status: "active",
     p1: side(boss1), p2: side(boss2),
     rng:{ seed, rollNo:0 }, log:[]
   };
