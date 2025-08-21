@@ -1,0 +1,21 @@
+{
+  "name": "functions",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^6.0.0",
+    "seedrandom": "^3.0.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/seedrandom": "^3.0.6"
+  }
+}
