@@ -93,7 +93,6 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
   await chatCol.add({ role: "user", uid, text, at: Date.now() });
 
   try {
-    // 盤面/手札/マニフェスト（語彙）を取得
     const [pubSnap, metaSnap] = await Promise.all([
       db.doc(`games/${gameId}/public/state`).get(),
       refM.get(),
@@ -110,9 +109,8 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
     }
     const manifest = await DualRaidAdapter.manifestForPrompt(pub, { mySeat: seat, myHand: privHand });
     const stateSummary = summarizeState(pub);
-    const rulebookExcerpt = RULEBOOK; // 短縮版でもOK
+    const rulebookExcerpt = RULEBOOK;
 
-    // 司会AIに判定を依頼
     const result = await arbitrate({
       rulepack: "dualraid",
       persona: (meta as any).ai_persona || "勝気だが礼儀正しい剣士。短文。",
@@ -124,7 +122,6 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
 
     let shouldAIMove = false;
 
-    // 盤面操作があれば適用（TX: read→write の順序）
     if (result.kind === "game" || result.kind === "both") {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(refI);
@@ -141,7 +138,8 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
           after = applyIntent(after, "P1", a);
         }
         const active = (after as any).status ? (after as any).status === "active" : true;
-        shouldAIMove = after.turn === "P2" && active;
+        // ← フェーズがプレイヤー手番("draw")の時だけ敵AIを動かす
+        shouldAIMove = (after.phase === "draw") && after.turn === "P2" && active;
 
         tx.set(refI, after);
         tx.set(refP, toPublic(after));
@@ -155,13 +153,11 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
       }
     }
 
-    // 会話があれば対戦相手AIの返答を出す
     if (result.kind === "chat" || result.kind === "both") {
       const reply = (result as any).reply || await opponentReply((meta as any).ai_persona || "勝気だが礼儀正しい剣士。短文。", text);
       await chatCol.add({ role: "opponent", text: reply, at: Date.now() });
     }
 
-    // 必要なら敵AIの自動手番（今は従来AIで代用）
     if (shouldAIMove) {
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(refI);

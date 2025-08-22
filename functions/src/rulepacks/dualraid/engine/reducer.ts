@@ -6,6 +6,7 @@ import { resolveBossAction } from "./boss.js";
 
 function meOf(gs:GameState,a:"P1"|"P2"){return a==="P1"?gs.p1:gs.p2;}
 function opOf(gs:GameState,a:"P1"|"P2"){return a==="P1"?gs.p2:gs.p1;}
+function other(a:"P1"|"P2"){return a==="P1"?"P2":"P1";}
 function shuffle<T>(arr:T[]){ for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]] } return arr; }
 
 export function draw(gs:GameState, a:"P1"|"P2", n:number){
@@ -13,81 +14,139 @@ export function draw(gs:GameState, a:"P1"|"P2", n:number){
   for(let i=0;i<n;i++){ const c = s.deck.shift(); if(c) s.hand.push(c); }
 }
 
-export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameState{
-  const v = softValidate(gs, actor, act); if(!v.ok) throw new Error(v.reason);
-  const me = meOf(gs,actor), enemy = opOf(gs,actor);
+function startOfTurn(gs:GameState, a:"P1"|"P2"){
+  // AP +1（上限まで）
+  for (const u of meOf(gs,a).adv) u.ap = Math.min(u.maxAp, u.ap + 1);
+  // 1ドロー
+  draw(gs, a, 1);
+  // このターンのフラグ初期化
+  meOf(gs,a).flags.supportUsedThisTurn = false;
+}
 
-  switch(act.type){
+export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameState{
+  if (gs.status!=="active") return gs;
+  softValidate(gs, actor, act);
+
+  const me = meOf(gs, actor);
+  const enemy = opOf(gs, actor);
+
+  switch (act.type) {
     case "use_action": {
-      const unit = me.adv.find((u:any)=>u.name===act.unit)!;
-      const card:any = dataset.cards.adventurers.find((x:any)=>x.name===unit.name)!;
-      const a:any = card.actions.find((x:any)=>x.name===act.action);
+      const unit = me.adv.find((u:any)=>u.name===act.unit);
+      if (!unit || unit.hp<=0) throw new Error("unit_not_available");
+      const card:any = (dataset as any).cards.adventurers.find((a:any)=>a.name===unit.name);
+      const a = (card?.actions||[]).find((x:any)=>x.name===act.action);
       if (!a) throw new Error("action_not_found");
-      if ((a.cost_ap||0) > unit.ap) throw new Error("ap_not_enough");
+      if ((unit.ap||0) < (a.cost_ap||0)) throw new Error("ap_insufficient");
       unit.ap -= (a.cost_ap||0);
 
-      if (a.type==="attack" || a.type==="attack_boss_only"){ dealDamageToBoss(enemy, a.damage||0); }
+      if (a.type==="attack"){ dealDamageToBoss(enemy, a.damage||0); }
+      else if (a.type==="attack_boss_only"){ dealDamageToBoss(enemy, a.damage||0); }
       else if (a.type==="aoe_attack"){ for(const e of enemy.adv.filter((x:any)=>x.hp>0)) dealDamageToAdventurer(e, a.damage||0); }
-      else if (a.type==="heal"){ const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0]; if (tgt) healAdventurer(tgt, a.heal||0); }
+      else if (a.type==="heal"){
+        if (a.target==="ally_all"){ for(const f of me.adv) healAdventurer(f, a.heal||0); }
+        else {
+          const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
+          if (tgt) healAdventurer(tgt, a.heal||0);
+        }
+      }
 
-      gs.log.push({ t:"act", actor, unit:unit.name, action:a.name, at:Date.now() });
+      gs.log.push({ t:"action", actor, unit:unit.name, name:a.name, at:Date.now() });
       break;
     }
+
     case "play_support": {
-      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
+      if (me.flags.supportUsedThisTurn) throw new Error("support_already_used");
+      const sup:any = (dataset as any).cards.supports.find((s:any)=>s.name===act.card);
+      if (!sup) throw new Error("support_not_found");
+      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
+      me.hand.splice(idx,1); me.discard.push(act.card);
       me.flags.supportUsedThisTurn = true;
 
-      if (act.card==="絆の記録"){
-        const fallen = me.adv.filter((x:any)=>x.hp<=0).length;
-        const drawN = Math.min(fallen, 2);
-        for (let i=0;i<drawN;i++){ const c = me.deck.shift(); if(c) me.hand.push(c); }
+      if (act.mode==="adventurer" && sup.adventurer_effect){
+        const ef = sup.adventurer_effect;
+        if (ef.type==="heal"){
+          if (ef.target==="ally_all"){ for(const f of me.adv) healAdventurer(f, ef.heal||0); }
+          else {
+            const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
+            if (tgt) healAdventurer(tgt, ef.heal||0);
+          }
+        } else if (ef.type==="buff_next_attack"){
+          const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
+          if (tgt) tgt.statuses = [...new Set([...(tgt.statuses||[]), `buff:${ef.multiplier||2}`])];
+        } else if (ef.type==="draw_cards"){
+          let k = 0;
+          if (ef.count_by==="fallen_allies"){ k = me.adv.filter((x:any)=>x.hp<=0).length; }
+          k = Math.min(k, ef.max||2);
+          draw(gs, actor, k);
+        }
+      } else if (act.mode==="boss" && sup.boss_effect){
+        const ef = sup.boss_effect;
+        if (ef.type==="dice_modifier_next"){
+          me.boss.stash = me.boss.stash || {};
+          me.boss.stash.nextDiceMod = (me.boss.stash.nextDiceMod||0) + (ef.value||0);
+        } else if (ef.type==="shield_next_hit"){
+          me.boss.stash = me.boss.stash || {};
+          me.boss.stash.nextTurnDamageUp = (me.boss.stash.nextTurnDamageUp||0) + (ef.reduce||0);
+        } else if (ef.type==="opponent_put_hand_to_deck"){
+          const n = Math.min(ef.count||1, enemy.hand.length);
+          for (let i=0;i<n;i++){ const c = enemy.hand.shift(); if (c) enemy.deck.push(c); }
+        }
       }
-      // 他のサポート効果は必要に応じてここに追加
+
       gs.log.push({ t:"support", actor, card:act.card, mode:act.mode, target:act.target||null, at:Date.now() });
       break;
     }
+
     case "play_field": {
+      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
+      me.hand.splice(idx,1); me.discard.push(act.card);
       if (act.side==="boss") me.fieldBoss = act.card; else me.fieldAdv = act.card;
-      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
       gs.log.push({ t:"field", actor, card:act.card, side:act.side, at:Date.now() });
       break;
     }
+
     case "equip": {
-      const unit = me.adv.find((u:any)=>u.name===act.unit);   // ← unit
-      if (!unit) throw new Error("unit_not_found");
-      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
-      unit.equipment = unit.equipment || [];
-      unit.equipment.push(act.card);
-
-      // 代表的な修正（dataset側に値があれば適用）
-      const eq:any = dataset.cards.equipment.find((e:any)=>e.name===act.card);
-      if (eq?.atk_plus)   unit.atk   = (unit.atk||0) + eq.atk_plus;
-      if (eq?.max_ap_plus)unit.maxAp = (unit.maxAp||0) + eq.max_ap_plus;
-
-      gs.log.push({ t:"equip", actor, unit:unit.name, card:act.card, at:Date.now() });
+      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
+      const unit = me.adv.find((u:any)=>u.name===act.unit); if (!unit) throw new Error("unit_not_found");
+      me.hand.splice(idx,1); unit.equipment.push(act.card);
+      gs.log.push({ t:"equip", actor, card:act.card, unit:act.unit, at:Date.now() });
       break;
     }
-    case "play_event": {
-      const idx = me.hand.indexOf(act.card); if (idx>=0) me.hand.splice(idx,1);
-      const ev:any = dataset.cards.events.find((e:any)=>e.name===act.card);
 
-      if (ev?.effect==="draw_if_fallen"){
-        const fallen = me.adv.filter((x:any)=>x.hp<=0).length;
-        const drawN = Math.min(fallen, 2);
-        for (let i=0;i<drawN;i++){ const c = me.deck.shift(); if(c) me.hand.push(c); }
-      }
-      // 他のイベント効果は必要に応じて追加
+    case "play_event": {
+      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
+      me.hand.splice(idx,1); me.discard.push(act.card);
+      // （簡易）イベント効果は今はログのみ
       gs.log.push({ t:"event", actor, card:act.card, at:Date.now() });
       break;
     }
-    case "end_turn": {
-      for (const u of me.adv) u.ap = Math.min(u.maxAp, u.ap + 1);
-      const res = resolveBossAction(gs, actor);
-      if (res) gs.log.push({ t:"boss_roll", actor, boss: me.boss.name, die:res.die, action:res.action, val:res.value, targets:res.targets||[], at:Date.now() });
 
-      gs.turn = actor==="P1" ? "P2" : "P1";
-      const nxt = meOf(gs, gs.turn);
-      nxt.flags.supportUsedThisTurn = false;
+    case "end_turn": {
+      // プレイヤーフェーズのみ終えられる（ボス中なら無視）
+      if (gs.phase!=="draw") return gs;
+
+      if (gs.turn === gs.roundStarter) {
+        // 先手の手番終了 → 後手の手番開始
+        gs.turn = other(gs.turn);
+        startOfTurn(gs, gs.turn);
+      } else {
+        // 後手の手番終了 → ボスフェーズ（順は roundStarter → other(roundStarter)）
+        gs.phase = "boss";
+        const order:("P1"|"P2")[] = [gs.roundStarter, other(gs.roundStarter)];
+        for (const side of order) {
+          const meSide = meOf(gs, side);
+          const res = resolveBossAction(gs, side);
+          if (res) {
+            gs.log.push({ t:"boss_roll", actor:side, boss: meSide.boss.name, die:res.die, action:res.action, val:res.value, targets:res.targets, at:Date.now() });
+          }
+        }
+        // 次ラウンド開始：先手交代 → プレイヤーフェーズ & 新先手の開始処理
+        gs.roundStarter = other(gs.roundStarter);
+        gs.turn = gs.roundStarter;
+        gs.phase = "draw";
+        startOfTurn(gs, gs.turn);
+      }
       break;
     }
   }
@@ -95,16 +154,15 @@ export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameSt
 }
 
 export function startGame(seed:string, boss1:string, boss2:string): GameState{
-  const pick:any[] = dataset.cards.adventurers.slice(0,4);
+  const pick:any[] = (dataset as any).cards.adventurers.slice(0,4);
   function side(bossName:string){
-    const bc:any = dataset.cards.bosses.find((b:any)=>b.name===bossName)!;
+    const bc:any = (dataset as any).cards.bosses.find((b:any)=>b.name===bossName)!;
     const adv = pick.map((a:any)=>({ id:a.id, name:a.name, hp:a.hp, maxHp:a.hp, atk:a.atk, ap:0, maxAp:a.max_ap, statuses:[], equipment:[] }));
-    const deck:string[] = [
-      ...dataset.cards.supports.map((s:any)=>s.name),
-      ...dataset.cards.equipment.map((e:any)=>e.name),
-      ...dataset.cards.events.map((v:any)=>v.name),
-      ...dataset.cards.fields.map((f:any)=>f.name),
-    ];
+    const deck:string[] = [];
+    for (const s of (dataset as any).cards.supports) deck.push(s.name);
+    for (const e of (dataset as any).cards.equipment) deck.push(e.name);
+    for (const v of (dataset as any).cards.events) deck.push(v.name);
+    for (const f of (dataset as any).cards.fields) deck.push(f.name);
     shuffle(deck);
     return { boss:{id:bc.id, name:bc.name, hp:bc.hp, maxHp:bc.hp}, adv, hand:[], deck, discard:[], fieldBoss:null, fieldAdv:null, flags:{supportUsedThisTurn:false} };
   }
@@ -113,8 +171,12 @@ export function startGame(seed:string, boss1:string, boss2:string): GameState{
     turn:"P1", phase:"draw",
     status: "active",
     p1: side(boss1), p2: side(boss2),
-    rng:{ seed, rollNo:0 }, log:[]
+    rng:{ seed, rollNo:0 }, log:[],
+    roundStarter: "P1",
   };
+  // 初期手札
   for (const s of [gs.p1, gs.p2]) { for (let i=0;i<3;i++){ const c=s.deck.shift(); if(c) s.hand.push(c); } }
+  // 先手開始処理
+  startOfTurn(gs, "P1");
   return gs;
 }
