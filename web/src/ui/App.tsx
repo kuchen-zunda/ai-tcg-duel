@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { initializeApp } from 'firebase/app'
 import { getAuth, signInAnonymously, onAuthStateChanged, User } from 'firebase/auth'
-import { getFirestore, collection, query, orderBy, onSnapshot } from 'firebase/firestore'
+import { getFirestore, doc, collection, query, orderBy, onSnapshot } from 'firebase/firestore'
 import { httpsCallable, getFunctions } from 'firebase/functions'
 import cards from '../data/min_tcg_set'
 
@@ -20,23 +20,42 @@ const auth = getAuth(app)
 const db = getFirestore(app)
 const functions = getFunctions(app, 'asia-northeast1')
 
-type Msg = { from:'me'|'sys', text:string }
+type ChatMsg = { role:'user'|'opponent'|'system', text:string, at:number }
 
 export default function App(){
   const [user, setUser] = useState<User|null>(null)
+  const [authReady, setAuthReady] = useState(false)
   const [gid, setGid]   = useState('')
   const [pub, setPub]   = useState<any>(null)
   const [priv, setPriv] = useState<any>(null)
-  const [msgs, setMsgs] = useState<Msg[]>([])
-  const [chat, setChat] = useState<{role:'user'|'opponent'|'system', text:string, at:number}[]>([])
+  const [chat, setChat] = useState<ChatMsg[]>([])
 
-  useEffect(()=>{ signInAnonymously(auth); return onAuthStateChanged(auth, u=> setUser(u)) }, [])
+  // 匿名サインイン → 完了後に購読できるようフラグを立てる
+  useEffect(()=>{
+    const unsub = onAuthStateChanged(auth, u => {
+      setUser(u)
+      setAuthReady(true)
+    })
+    signInAnonymously(auth).catch(console.error)
+    return unsub
+  }, [])
+
+  // 盤面（public / private）購読
+  useEffect(()=>{
+    if (!gid || !authReady) return
+    const unsubPub = onSnapshot(doc(db, 'games', gid, 'public', 'state'), s => setPub(s.data()))
+    let unsubPriv = () => {}
+    if (user) {
+      unsubPriv = onSnapshot(doc(db, 'games', gid, 'private', user.uid), s => setPriv(s.data()))
+    }
+    return ()=>{ unsubPub(); unsubPriv(); }
+  }, [gid, authReady, user])
+
+  // チャット購読
   useEffect(()=>{
     if (!gid) return
     const q = query(collection(db, 'games', gid, 'chat'), orderBy('at', 'asc'))
-    const unsub = onSnapshot(q, snap=>{
-      setChat(snap.docs.map(d=> d.data() as any))
-    })
+    const unsub = onSnapshot(q, snap => setChat(snap.docs.map(d=> d.data() as ChatMsg)))
     return ()=> unsub()
   }, [gid])
 
@@ -44,34 +63,32 @@ export default function App(){
     const startGameFn = httpsCallable(functions, 'startGameFn')
     const res:any = await startGameFn({})
     setGid(res.data.gameId)
-    setMsgs(m=>[...m, {from:'sys', text:`ゲーム開始（ID: ${res.data.gameId}）` }])
   }
 
   const sendLine = async (line:string)=>{
-    try{
-      const chatFn = httpsCallable(functions, 'chatRouterFn')
-      await chatFn({ gameId: gid, text: line })
-      // 送信/返信はFirestore購読で反映される
-    }catch(e:any){ /* エラーメッセージ表示など */ }
+    if (!gid) return
+    const chatFn = httpsCallable(functions, 'chatRouterFn')
+    await chatFn({ gameId: gid, text: line })
+    // 送信・返信は購読で流れてくる
   }
 
   return (
     <div style={{fontFamily:'system-ui', height:'100vh', display:'grid', gridTemplateRows:'auto 1fr', gap:8}}>
       <header style={{padding:'8px 12px', borderBottom:'1px solid #e5e5e5', display:'flex', alignItems:'center', gap:12}}>
         <b>Dual Raid TCG</b>
-        {!gid && <button onClick={start}>Start New Game (vs AI)</button>}
+        {!gid && <button disabled={!authReady} onClick={start}>Start New Game (vs AI)</button>}
         {gid && <span style={{opacity:.7}}>Game: {gid}</span>}
       </header>
 
       <main style={{display:'grid', gridTemplateColumns:'1fr 360px', gap:10, padding:10}}>
         <Battlefield pub={pub} priv={priv}/>
-        <RightPane pub={pub} msgs={msgs} onSend={sendLine}/>
+        <RightPane pub={pub} chat={chat} onSend={sendLine}/>
       </main>
     </div>
   )
 }
 
-function RightPane({ pub, msgs, onSend }:{ pub:any, msgs:Msg[], onSend:(t:string)=>void }){
+function RightPane({ pub, chat, onSend }:{ pub:any, chat:ChatMsg[], onSend:(t:string)=>void }){
   const [line,setLine] = useState('')
   const ref = useRef<HTMLInputElement>(null)
   return (
@@ -80,10 +97,17 @@ function RightPane({ pub, msgs, onSend }:{ pub:any, msgs:Msg[], onSend:(t:string
       <div style={{borderTop:'1px dashed #ddd', paddingTop:8, fontSize:12, color:'#555'}}>
         例）「リオで攻撃」「ルゥナでヒール→リオ」「勇気のお守り→リオ」「絆の記録 使う」「フィールド 古戦場 ボス」「ターン返します」
       </div>
-      <div style={{border:'1px solid #ddd', borderRadius:10, padding:8, display:'grid', gridTemplateRows:'1fr auto', height:200}}>
+      <div style={{border:'1px solid #ddd', borderRadius:10, padding:8, display:'grid', gridTemplateRows:'1fr auto', height:220}}>
         <div style={{overflowY:'auto', display:'grid', gap:6}}>
-          {msgs.map((m,i)=>(
-            <div key={i} style={{justifySelf: m.from==='me'?'end':'start', background:m.from==='me'?'#e8f7ff':'#f6f6f6', borderRadius:8, padding:'6px 8px'}}>{m.text}</div>
+          {chat.map((m,i)=>(
+            <div key={i}
+              style={{
+                justifySelf: m.role==='user'?'end':'start',
+                background: m.role==='user' ? '#e8f7ff' : m.role==='opponent' ? '#f6f6f6' : '#fff5d6',
+                borderRadius:8, padding:'6px 8px', fontSize:13
+              }}>
+              {m.text}
+            </div>
           ))}
         </div>
         <form onSubmit={e=>{ e.preventDefault(); if(!line.trim()) return; onSend(line.trim()); setLine(''); ref.current?.focus(); }} style={{display:'flex', gap:8, marginTop:8}}>
@@ -101,7 +125,7 @@ function LogPanel({ pub }:{ pub:any }){
       <div style={{fontWeight:600, marginBottom:6}}>ログ</div>
       <ul style={{fontSize:12, lineHeight:1.5, margin:0, paddingLeft:18}}>
         {(pub?.log||[]).slice(-50).map((e:any,idx:number)=>{
-          if (e.t==="nlp")        return <li key={idx}>[parse] {e.text} → {e.parsed?.type}</li>
+          if (e.t==="nlp")        return <li key={idx}>[parse] {e.text} → {Array.isArray(e.parsed)?`${e.parsed.length} actions`:(e.parsed?.type||'')}</li>
           if (e.t==="act")        return <li key={idx}>[{e.actor}] {e.unit} が「{e.action}」</li>
           if (e.t==="support")    return <li key={idx}>[{e.actor}] サポート「{e.card}」({e.mode}) {e.target?`→ ${e.target}`:""}</li>
           if (e.t==="equip")      return <li key={idx}>[{e.actor}] {e.unit} に装備「{e.card}」</li>
@@ -210,7 +234,6 @@ function imgPath(type:'adv'|'boss', name:string){
 }
 function CardImage({ name, type, hp, maxHp, ap, maxAp }:{ name:string, type:'adv'|'boss', hp:number, maxHp:number, ap?:number, maxAp?:number }){
   const url = useMemo(()=> imgPath(type, name), [type,name])
-  // 画像が無い場合のプレースホルダ
   const style:React.CSSProperties = {
     width: 160, height: 220, borderRadius: 12,
     backgroundImage: `url(${url})`,

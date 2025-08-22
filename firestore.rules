@@ -1,9 +1,21 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /games/{gid}/internal/{doc} { allow read, write: if false; }
-    match /games/{gid}/public/{doc}   { allow read: if true; allow write: if false; }
-    match /games/{gid}/private/{uid}  { allow read: if request.auth != null && request.auth.uid == uid; allow write: if false; }
-    match /games/{gid}/events/{eid}   { allow read: if true; allow write: if false; }
+    function isSignedIn() { return request.auth != null; }
+
+    match /games/{gid} {
+      // 公開盤面（観戦OK）
+      match /public/{doc=**}  { allow read: if true; allow write: if false; }
+      // チャット（観戦OK）
+      match /chat/{doc=**}    { allow read: if true; allow write: if false; }
+      // 各プレイヤの手札等（本人のみ）
+      match /private/{uid}    { allow read: if isSignedIn() && request.auth.uid == uid; allow write: if false; }
+      // サーバ専用
+      match /internal/{doc=**}{ allow read, write: if false; }
+      match /meta/{doc=**}    { allow read, write: if false; }
+    }
+
+    // それ以外は不許可
+    match /{document=**} { allow read, write: if false; }
   }
 }
