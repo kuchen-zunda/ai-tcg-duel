@@ -3,11 +3,11 @@ import { getFirestore } from "firebase-admin/firestore";
 import { onCall } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
 import { REGION } from "./config.js";
-import dataset from "./data/min_tcg_set.js";
-import { applyIntent, startGame } from "./engine/reducer.js";
-import { aiTakeTurn } from "./engine/ai.js";
-import type { GameState, Action } from "./engine/types.js";
-import { DualRaidAdapter } from "./engine/dualraid/adapter.js";
+import dataset from "./rulepacks/dualraid/dataset.js";
+import { applyIntent, startGame } from "./rulepacks/dualraid/engine/reducer.js";
+import { aiTakeTurn } from "./rulepacks/dualraid/engine/ai.js";
+import type { GameState, Action } from "./rulepacks/dualraid/engine/types.js";
+import { DualRaidAdapter } from "./rulepacks/dualraid/adapter.js";
 import { routeUserText } from "./ai/router.js";
 
 initializeApp();

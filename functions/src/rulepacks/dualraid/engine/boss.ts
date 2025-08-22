@@ -1,7 +1,7 @@
 import { GameState } from "./types.js";
 import { dealDamageToAdventurer, dealDamageToBoss } from "./primitives.js";
 import { nextInt } from "./rng.js";
-import dataset from "../data/min_tcg_set.js";
+import dataset from "../dataset.js";
 
 export function resolveBossAction(gs: GameState, actor:"P1"|"P2"){
   const me = actor==="P1"? gs.p1 : gs.p2;

@@ -1,5 +1,5 @@
 import { getFirestore } from "firebase-admin/firestore";
-import type { GameState, Action } from "../engine/types.js";
+import type { GameState, Action } from "../rulepacks/dualraid/engine/types.js";
 import type { EngineAdapter, RouterResult } from "../core/types.js";
 
 const SYSTEM = `You are a router for a turn-based card game with roleplay.

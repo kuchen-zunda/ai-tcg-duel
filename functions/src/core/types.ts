@@ -1,4 +1,4 @@
-import type { GameState, Action } from "../engine/types.js";
+import type { GameState, Action } from "../rulepacks/dualraid/engine/types.js";
 
 // 今は dualraid 固定だが将来 "pokeca" | "ygo" などを足す
 export type EngineId = "dualraid";

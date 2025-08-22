@@ -1,6 +1,6 @@
-import dataset from "../../data/min_tcg_set.js";
-import type { GameState, Action } from "../../engine/types.js";
-import { applyIntent } from "../../engine/reducer.js";
+import dataset from "./dataset.js";
+import type { GameState, Action } from "./engine/types.js";
+import { applyIntent } from "./engine/reducer.js";
 import type { EngineAdapter } from "../../core/types.js";
 
 export const DualRaidAdapter: EngineAdapter = {

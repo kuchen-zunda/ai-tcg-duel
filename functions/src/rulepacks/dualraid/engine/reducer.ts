@@ -1,4 +1,4 @@
-import dataset from "../data/min_tcg_set.js";
+import dataset from "../dataset.js";
 import { Action, GameState } from "./types.js";
 import { dealDamageToAdventurer, dealDamageToBoss, healAdventurer } from "./primitives.js";
 import { softValidate } from "./validate.js";
