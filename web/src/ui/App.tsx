@@ -30,7 +30,6 @@ export default function App(){
   const [priv, setPriv] = useState<any>(null)
   const [chat, setChat] = useState<ChatMsg[]>([])
 
-  // 匿名サインイン → 完了後に購読できるようフラグを立てる
   useEffect(()=>{
     const unsub = onAuthStateChanged(auth, u => {
       setUser(u)
@@ -40,7 +39,6 @@ export default function App(){
     return unsub
   }, [])
 
-  // 盤面（public / private）購読
   useEffect(()=>{
     if (!gid || !authReady) return
     const unsubPub = onSnapshot(doc(db, 'games', gid, 'public', 'state'), s => setPub(s.data()))
@@ -51,7 +49,6 @@ export default function App(){
     return ()=>{ unsubPub(); unsubPriv(); }
   }, [gid, authReady, user])
 
-  // チャット購読
   useEffect(()=>{
     if (!gid) return
     const q = query(collection(db, 'games', gid, 'chat'), orderBy('at', 'asc'))
@@ -67,9 +64,12 @@ export default function App(){
 
   const sendLine = async (line:string)=>{
     if (!gid) return
-    const chatFn = httpsCallable(functions, 'chatRouterFn')
-    await chatFn({ gameId: gid, text: line })
-    // 送信・返信は購読で流れてくる
+    try {
+      const chatFn = httpsCallable(functions, 'chatRouterFn')
+      await chatFn({ gameId: gid, text: line })
+    } catch (e:any) {
+      alert(`送信に失敗しました: ${e?.message||e}`)
+    }
   }
 
   return (
@@ -149,9 +149,7 @@ function Battlefield({ pub, priv }:{ pub:any, priv:any }){
 
   return (
     <div style={{display:'grid', gridTemplateRows:'1fr 1fr', gap:10}}>
-      {/* 奥：相手 */}
       <Row side="opponent" boss={opp?.boss} adv={opp?.adv} handCount={opp?.handCount} deckCount={opp?.deckCount} advDef={advDef} bossDef={bossDef}/>
-      {/* 手前：自分 */}
       <Row side="me" boss={me?.boss} adv={me?.adv} hand={priv?.hand||[]} handCount={(priv?.hand||[]).length} deckCount={priv?.deckCount} advDef={advDef} bossDef={bossDef}/>
     </div>
   )
@@ -165,7 +163,6 @@ function Row({ side, boss, adv, hand, handCount, deckCount, advDef, bossDef }:{
   const isMe = side==='me'
   return (
     <div style={{display:'grid', gridTemplateRows:'auto auto', gap:6}}>
-      {/* Boss line */}
       <div style={{display:'flex', alignItems:'center', gap:10}}>
         <CardImage name={boss?.name} type="boss" hp={boss?.hp} maxHp={boss?.maxHp}/>
         <div style={{fontSize:12, opacity:.9}}>
@@ -177,7 +174,6 @@ function Row({ side, boss, adv, hand, handCount, deckCount, advDef, bossDef }:{
         </div>
       </div>
 
-      {/* Adventurers line */}
       <div style={{display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:10}}>
         {adv?.map((a:any)=>(
           <div key={a.id} style={{display:'grid', gridTemplateRows:'auto auto', gap:6, opacity:a.hp>0?1:0.6}}>
@@ -187,7 +183,6 @@ function Row({ side, boss, adv, hand, handCount, deckCount, advDef, bossDef }:{
         ))}
       </div>
 
-      {/* 手札（自分だけ表示） */}
       {isMe && (
         <div style={{fontSize:12, opacity:.9}}>
           手札：{(hand||[]).join(" / ") || "(なし)"}（{hand?.length||0}枚）
