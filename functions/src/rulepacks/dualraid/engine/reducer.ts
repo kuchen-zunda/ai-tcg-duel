@@ -1,172 +1,140 @@
+// functions/src/rulepacks/dualraid/engine/reducer.ts
+import type { Action, GameState } from "./types.js";
 import dataset from "../dataset.js";
-import { Action, GameState } from "./types.js";
-import { dealDamageToAdventurer, dealDamageToBoss, healAdventurer } from "./primitives.js";
-import { softValidate } from "./validate.js";
-import { resolveBossAction } from "./boss.js";
+import { softValidate, onTurnStart, findAction, validateDeck } from "./validate.js";
 
-function meOf(gs:GameState,a:"P1"|"P2"){return a==="P1"?gs.p1:gs.p2;}
-function opOf(gs:GameState,a:"P1"|"P2"){return a==="P1"?gs.p2:gs.p1;}
-function other(a:"P1"|"P2"){return a==="P1"?"P2":"P1";}
-function shuffle<T>(arr:T[]){ for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]] } return arr; }
+// 便利関数
+function me(gs:GameState, actor:"P1"|"P2"){ return actor==="P1" ? gs.p1 : gs.p2; }
+function enemy(gs:GameState, actor:"P1"|"P2"){ return actor==="P1" ? gs.p2 : gs.p1; }
+function log(gs:GameState, entry:any){ gs.log = gs.log||[]; gs.log.push({ ...entry, at: Date.now() }); }
 
-export function draw(gs:GameState, a:"P1"|"P2", n:number){
-  const s = meOf(gs,a);
-  for(let i=0;i<n;i++){ const c = s.deck.shift(); if(c) s.hand.push(c); }
+function dealDamageToBoss(side:any, dmg:number){
+  side.boss.hp = Math.max(0, side.boss.hp - Math.max(0, dmg||0));
+}
+function dealDamageToAdventurer(unit:any, dmg:number){
+  unit.hp = Math.max(0, unit.hp - Math.max(0, dmg||0));
+}
+function healAdventurer(unit:any, val:number){
+  unit.hp = Math.min(unit.maxHp, unit.hp + Math.max(0,val||0));
 }
 
-function startOfTurn(gs:GameState, a:"P1"|"P2"){
-  for (const u of meOf(gs,a).adv) u.ap = Math.min(u.maxAp, u.ap + 1);
-  draw(gs, a, 1);
-  meOf(gs,a).flags.supportUsedThisTurn = false;
-}
+export function startGame(seed:string, p1BossName?:string, p2BossName?:string): GameState {
+  // デッキ生成（既存データの name[] を適当に20枚にする例。プロジェクト側の生成ロジックがあれば差し替えOK）
+  const allNames = [
+    ...(dataset as any).cards.supports.map((c:any)=>c.name),
+    ...(dataset as any).cards.equipment.map((c:any)=>c.name),
+    ...(dataset as any).cards.events.map((c:any)=>c.name || []).filter(Boolean),
+    ...(dataset as any).cards.fields.map((c:any)=>c.name)
+  ].filter(Boolean);
 
-export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameState{
-  if (gs.status!=="active") return gs;
-  softValidate(gs, actor, act);
-
-  const me = meOf(gs, actor);
-  const enemy = opOf(gs, actor);
-
-  switch (act.type) {
-    case "use_action": {
-      const unit = me.adv.find((u:any)=>u.name===act.unit);
-      if (!unit || unit.hp<=0) throw new Error("unit_not_available");
-      const card:any = (dataset as any).cards.adventurers.find((a:any)=>a.name===unit.name);
-      const a = (card?.actions||[]).find((x:any)=>x.name===act.action);
-      if (!a) throw new Error("action_not_found");
-      if ((unit.ap||0) < (a.cost_ap||0)) throw new Error("ap_insufficient");
-      unit.ap -= (a.cost_ap||0);
-
-      if (a.type==="attack"){ dealDamageToBoss(enemy, a.damage||0); }
-      else if (a.type==="attack_boss_only"){ dealDamageToBoss(enemy, a.damage||0); }
-      else if (a.type==="aoe_attack"){ for(const e of enemy.adv.filter((x:any)=>x.hp>0)) dealDamageToAdventurer(e, a.damage||0); }
-      else if (a.type==="heal"){
-        if (a.target==="ally_all"){ for(const f of me.adv) healAdventurer(f, a.heal||0); }
-        else {
-          const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
-          if (tgt) healAdventurer(tgt, a.heal||0);
-        }
-      }
-
-      gs.log.push({ t:"action", actor, unit:unit.name, name:a.name, at:Date.now() });
-      break;
-    }
-
-    case "play_support": {
-      if (me.flags.supportUsedThisTurn) throw new Error("support_already_used");
-      const sup:any = (dataset as any).cards.supports.find((s:any)=>s.name===act.card);
-      if (!sup) throw new Error("support_not_found");
-      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
-      me.hand.splice(idx,1); me.discard.push(act.card);
-      me.flags.supportUsedThisTurn = true;
-
-      if (act.mode==="adventurer" && sup.adventurer_effect){
-        const ef = sup.adventurer_effect;
-        if (ef.type==="heal"){
-          if (ef.target==="ally_all"){ for(const f of me.adv) healAdventurer(f, ef.heal||0); }
-          else {
-            const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
-            if (tgt) healAdventurer(tgt, ef.heal||0);
-          }
-        } else if (ef.type==="buff_next_attack"){
-          const tgt = me.adv.find((x:any)=>x.name===act.target) || me.adv[0];
-          if (tgt) tgt.statuses = [...new Set([...(tgt.statuses||[]), `buff:${ef.multiplier||2}`])];
-        } else if (ef.type==="draw_cards"){
-          let k = 0;
-          if (ef.count_by==="fallen_allies"){ k = me.adv.filter((x:any)=>x.hp<=0).length; }
-          k = Math.min(k, ef.max||2);
-          draw(gs, actor, k);
-        }
-      } else if (act.mode==="boss" && sup.boss_effect){
-        const ef = sup.boss_effect;
-        if (ef.type==="dice_modifier_next"){
-          me.boss.stash = me.boss.stash || {};
-          me.boss.stash.nextDiceMod = (me.boss.stash.nextDiceMod||0) + (ef.value||0);
-        } else if (ef.type==="shield_next_hit"){
-          me.boss.stash = me.boss.stash || {};
-          me.boss.stash.nextTurnDamageUp = (me.boss.stash.nextTurnDamageUp||0) + (ef.reduce||0);
-        } else if (ef.type==="opponent_put_hand_to_deck"){
-          const n = Math.min(ef.count||1, enemy.hand.length);
-          for (let i=0;i<n;i++){ const c = enemy.hand.shift(); if (c) enemy.deck.push(c); }
-        }
-      }
-
-      gs.log.push({ t:"support", actor, card:act.card, mode:act.mode, target:act.target||null, at:Date.now() });
-      break;
-    }
-
-    case "play_field": {
-      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
-      me.hand.splice(idx,1); me.discard.push(act.card);
-      if (act.side==="boss") me.fieldBoss = act.card; else me.fieldAdv = act.card;
-      gs.log.push({ t:"field", actor, card:act.card, side:act.side, at:Date.now() });
-      break;
-    }
-
-    case "equip": {
-      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
-      const unit = me.adv.find((u:any)=>u.name===act.unit); if (!unit) throw new Error("unit_not_found");
-      me.hand.splice(idx,1); unit.equipment.push(act.card);
-      gs.log.push({ t:"equip", actor, card:act.card, unit:act.unit, at:Date.now() });
-      break;
-    }
-
-    case "play_event": {
-      const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
-      me.hand.splice(idx,1); me.discard.push(act.card);
-      gs.log.push({ t:"event", actor, card:act.card, at:Date.now() });
-      break;
-    }
-
-    case "end_turn": {
-      if (gs.phase!=="draw") return gs;
-
-      if (gs.turn === gs.roundStarter) {
-        gs.turn = other(gs.turn);
-        startOfTurn(gs, gs.turn);
-      } else {
-        gs.phase = "boss";
-        const order:("P1"|"P2")[] = [gs.roundStarter, other(gs.roundStarter)];
-        for (const side of order) {
-          const meSide = meOf(gs, side);
-          const res = resolveBossAction(gs, side);
-          if (res) {
-            gs.log.push({ t:"boss_roll", actor:side, boss: meSide.boss.name, die:res.die, action:res.action, val:res.value, targets:res.targets, at:Date.now() });
-          }
-        }
-        gs.roundStarter = other(gs.roundStarter);
-        gs.turn = gs.roundStarter;
-        gs.phase = "draw";
-        startOfTurn(gs, gs.turn);
-      }
-      break;
-    }
+  function mkDeck():string[] {
+    const pool = [...allNames];
+    const deck:string[]=[];
+    while(deck.length<20){ deck.push(pool[deck.length % pool.length]); }
+    validateDeck(deck);
+    return deck;
   }
+
+  const p1 = {
+    boss: { id:"b1", name: p1BossName || (dataset as any).cards.bosses[0].name, hp:(dataset as any).cards.bosses[0].hp, maxHp:(dataset as any).cards.bosses[0].hp },
+    adv: (dataset as any).cards.adventurers.slice(0,4).map((a:any,i:number)=>({ id:"a1"+i, name:a.name, hp:a.hp, maxHp:a.hp, ap:0, maxAp:a.max_ap||6, statuses:[], equipment:[] })),
+    hand: [] as string[],
+    deck: mkDeck(),
+    discard: [] as string[],
+    fieldAdv: null as string|null,
+    fieldBoss: null as string|null,
+  };
+  const p2 = {
+    boss: { id:"b2", name: p2BossName || (dataset as any).cards.bosses[1]?.name || (dataset as any).cards.bosses[0].name, hp:(dataset as any).cards.bosses[1]?.hp || (dataset as any).cards.bosses[0].hp, maxHp:(dataset as any).cards.bosses[1]?.hp || (dataset as any).cards.bosses[0].hp },
+    adv: (dataset as any).cards.adventurers.slice(0,4).map((a:any,i:number)=>({ id:"a2"+i, name:a.name, hp:a.hp, maxHp:a.hp, ap:0, maxAp:a.max_ap||6, statuses:[], equipment:[] })),
+    hand: [] as string[],
+    deck: mkDeck(),
+    discard: [] as string[],
+    fieldAdv: null as string|null,
+    fieldBoss: null as string|null,
+  };
+
+  // 初期手札3枚
+  p1.hand = p1.deck.splice(0,3);
+  p2.hand = p2.deck.splice(0,3);
+
+  const gs:GameState = {
+    seed,
+    rng: { seed, rollNo: 0 },        // ← 追加
+    status:"active",
+    turn:"P1",
+    p1, p2,
+    log:[],
+    flags:{}
+  };
+  onTurnStart(gs, "P1"); // P1開始時にAP+1など
   return gs;
 }
 
-export function startGame(seed:string, boss1:string, boss2:string): GameState{
-  const pick:any[] = (dataset as any).cards.adventurers.slice(0,4);
-  function side(bossName:string){
-    const bc:any = (dataset as any).cards.bosses.find((b:any)=>b.name===bossName)!;
-    const adv = pick.map((a:any)=>({ id:a.id, name:a.name, hp:a.hp, maxHp:a.hp, atk:a.atk, ap:0, maxAp:a.max_ap, statuses:[], equipment:[] }));
-    const deck:string[] = [];
-    for (const s of (dataset as any).cards.supports) deck.push(s.name);
-    for (const e of (dataset as any).cards.equipment) deck.push(e.name);
-    for (const v of (dataset as any).cards.events) deck.push(v.name);
-    for (const f of (dataset as any).cards.fields) deck.push(f.name);
-    shuffle(deck);
-    return { boss:{id:bc.id, name:bc.name, hp:bc.hp, maxHp:bc.hp}, adv, hand:[], deck, discard:[], fieldBoss:null, fieldAdv:null, flags:{supportUsedThisTurn:false} };
+export function applyIntent(gs:GameState, actor:"P1"|"P2", a:Action): GameState {
+  if (gs.status!=="active") return gs;
+
+  const reason = softValidate(gs, actor, a);
+  if (reason) { log(gs,{t:"invalid", actor, reason}); return gs; }
+
+  const mine:any = me(gs, actor);
+  const foe:any = enemy(gs, actor);
+
+  if (a.type==="end_turn"){
+    // 相手ターンへ
+    const next = actor==="P1" ? "P2" : "P1";
+    gs.turn = next;
+    onTurnStart(gs, next);
+    log(gs,{ t:"end", actor });
+    return gs;
   }
-  const gs:GameState = {
-    id: "g_"+Math.random().toString(36).slice(2,10),
-    turn:"P1", phase:"draw",
-    status: "active",
-    p1: side(boss1), p2: side(boss2),
-    rng:{ seed, rollNo:0 }, log:[],
-    roundStarter: "P1",
-  };
-  for (const s of [gs.p1, gs.p2]) { for (let i=0;i<3;i++){ const c=s.deck.shift(); if(c) s.hand.push(c); } }
-  startOfTurn(gs, "P1");
+
+  if (a.type==="use_action"){
+    const unit = mine.adv.find((u:any)=>u.name===a.unit)!;
+    const def:any = findAction(a.unit, a.action)!;
+    unit.ap = Math.max(0, (unit.ap||0) - (def.cost_ap||0));
+    unit.statuses = [...new Set([...(unit.statuses||[]), "acted"])];
+
+    if (def.type==="attack" || def.type==="attack_boss_only"){
+      dealDamageToBoss(foe, def.damage||0);
+      log(gs,{ t:"action", actor, unit:a.unit, name:a.action, dmg:def.damage||0, target:"boss" });
+    } else if (def.type==="aoe_attack"){
+      for(const e of foe.adv.filter((x:any)=>x.hp>0)) dealDamageToAdventurer(e, def.damage||0);
+      log(gs,{ t:"action", actor, unit:a.unit, name:a.action, aoe:def.damage||0 });
+    } else if (def.type==="heal"){
+      const tgt = mine.adv.find((x:any)=>x.name===a.target) || mine.adv.find((x:any)=>x.hp>0);
+      if (tgt) healAdventurer(tgt, def.heal||0);
+      log(gs,{ t:"action", actor, unit:a.unit, name:a.action, heal:def.heal||0, target:tgt?.name });
+    } else if (def.type==="defend"){
+      unit.statuses = [...new Set([...(unit.statuses||[]), `defend:${def.reduce||0}`])];
+      log(gs,{ t:"action", actor, unit:a.unit, name:a.action, defend:def.reduce||0 });
+    } else {
+      log(gs,{ t:"action", actor, unit:a.unit, name:a.action });
+    }
+    return gs;
+  }
+
+  if (a.type==="play_support"){
+    const idx = mine.hand.indexOf(a.card); if (idx>=0) mine.hand.splice(idx,1);
+    gs.flags = gs.flags || {}; gs.flags[actor] = gs.flags[actor] || {}; gs.flags[actor].supportUsed = true;
+    log(gs,{ t:"support", actor, card:a.card, mode:a.mode, target:a.target });
+    return gs;
+  }
+
+  if (a.type==="play_field"){
+    const idx = mine.hand.indexOf(a.card); if (idx>=0) mine.hand.splice(idx,1);
+    if (a.side==="adventurer") mine.fieldAdv = a.card; else mine.fieldBoss = a.card;
+    log(gs,{ t:"field", actor, card:a.card, side:a.side });
+    return gs;
+  }
+
+  if (a.type==="equip"){
+    const idx = mine.hand.indexOf(a.card); if (idx>=0) mine.hand.splice(idx,1);
+    const unit = mine.adv.find((u:any)=>u.name===a.unit)!;
+    unit.equipment = [...(unit.equipment||[]), a.card];  // 同一冒険者に複数可
+    log(gs,{ t:"equip", actor, card:a.card, unit:a.unit });
+    return gs;
+  }
+
   return gs;
 }
