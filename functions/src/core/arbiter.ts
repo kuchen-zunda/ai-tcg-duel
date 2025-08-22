@@ -1,121 +1,130 @@
-import type { ArbiterInput, DecideResult } from "./schema.js";
+// functions/src/core/arbiter.ts
+import dataset from "../rulepacks/dualraid/dataset.js";
+import type { Action, GameState } from "../rulepacks/dualraid/engine/types.js";
 
-const SYSTEM = `You are the host/referee of a TCG room.
-Read rulebook and manifest; return ONLY JSON matching the schema.
-Never invent card/unit/action names beyond the provided manifest.
-If input is casual chat, do not produce any action.`;
+type ArbiterIn = {
+  rulepack: "dualraid";
+  persona: string;           // 相手AIのペルソナ（会話用）
+  stateSummary: string;      // 盤面サマリ（未使用でもOK）
+  manifest: any;             // UI向けマニフェスト（未使用でもOK）
+  rulebookExcerpt: string;   // ルール要約（未使用でもOK）
+  userUtterance: string;     // ユーザ自然文
+};
 
-function safe<T=any>(s:string){ try{ return JSON.parse(s) as T } catch{ return {kind:"unknown", ask:"もう一度短くお願い"} as any } }
+type ArbiterOut =
+  | { kind: "game"; actions: Action[]; narration?: string }
+  | { kind: "chat"; reply: string }
+  | { kind: "both"; actions: Action[]; reply: string; narration?: string };
 
-function norm(s:string){
-  return s.replace(/[！!。．\.?？、,]/g,' ').replace(/\s+/g,' ').trim();
+// ---- ユーティリティ --------------------------------------------------------
+
+const advNames = (dataset as any).cards.adventurers.map((a:any)=>a.name);
+const supportNames = (dataset as any).cards.supports.map((s:any)=>s.name);
+const equipNames = (dataset as any).cards.equipment.map((e:any)=>e.name);
+
+function pickAttackAction(unitName:string){
+  const card:any = (dataset as any).cards.adventurers.find((a:any)=>a.name===unitName);
+  if (!card) return null;
+  // 優先：type=attack / 次点：名前に「攻撃」「斬」「打」「突」が含まれる
+  const byType = (card.actions||[]).find((x:any)=>x.type==="attack" || x.type==="attack_boss_only");
+  if (byType) return byType.name;
+  const byName = (card.actions||[]).find((x:any)=>/(攻撃|斬|打|突)/.test(x.name));
+  return byName?.name || (card.actions?.[0]?.name ?? null);
 }
 
-export async function arbitrate(input: ArbiterInput, model = process.env.OPENAI_MODEL || "gpt-4o-mini"): Promise<DecideResult>{
-  const key = process.env.OPENAI_API_KEY;
-  const prompt = `Rulepack: ${input.rulepack}
-Opponent Persona: ${input.persona}
-State Summary: ${input.stateSummary}
+function pickHealAction(unitName:string){
+  const card:any = (dataset as any).cards.adventurers.find((a:any)=>a.name===unitName);
+  if (!card) return null;
+  const byType = (card.actions||[]).find((x:any)=>x.type==="heal");
+  return byType?.name ?? null;
+}
 
-Manifest Units: ${JSON.stringify(input.manifest.units)}
-ActionsByUnit: ${JSON.stringify(input.manifest.actionsByUnit)}
-CardsByCategory: ${JSON.stringify(input.manifest.cardsByCategory)}
-Hand: ${JSON.stringify(input.manifest.hand)}
+function normalize(s:string){
+  return s.replace(/\s+/g,"").toLowerCase();
+}
 
-Rulebook excerpt:
-"""
-${input.rulebookExcerpt}
-"""
+function includesAny(s:string, pats:RegExp[]){
+  return pats.some(re=>re.test(s));
+}
 
-User: """${input.userUtterance}"""
+// ---- ルールベースNLU -------------------------------------------------------
 
-Return ONLY one of:
-{"kind":"game","actions":[...] ,"narration": "<jp>"}
-{"kind":"chat","reply":"<jp>"}
-{"kind":"both","actions":[...],"reply":"<jp>","narration":"<jp>"}
-{"kind":"unknown","ask":"<jp>"} 
-`;
+export async function arbitrate(input: ArbiterIn): Promise<ArbiterOut> {
+  const text = input.userUtterance.trim();
 
-  if (key){
-    try{
-      const r = await fetch("https://api.openai.com/v1/chat/completions", {
-        method:"POST",
-        headers:{ "Authorization":`Bearer ${key}`, "Content-Type":"application/json" },
-        body: JSON.stringify({
-          model, temperature:0.2,
-          response_format:{ type:"json_object" },
-          messages:[ {role:"system", content:SYSTEM}, {role:"user", content:prompt} ]
-        })
-      });
-      const j = await r.json();
-      const out = safe<DecideResult>(j?.choices?.[0]?.message?.content || "{}");
-      if (out && out.kind && out.kind !== "unknown") return out;
-    }catch{ /* フォールバックへ */ }
+  // 1) ターン終了（ゆらぎ大量）
+  const endTurnRE = /(ターン(終|終了|エンド)|エンド|endturn|ターン回す|ターン返す|ターン返しました|手番終わり)/i;
+  if (endTurnRE.test(text)) {
+    const actions: Action[] = [{ type: "end_turn" }];
+    return { kind: "game", actions, narration: "あなたはターンを終了した。" };
   }
 
-  // ---- フォールバック（ローカルゆるふわ正規化） ----
-  const t = norm(input.userUtterance);
-  if (/(ターン(終|終了)|エンド|ターン返(す|します))/.test(t)) {
-    return { kind:"game", actions:[{type:"end_turn"}] } as any;
-  }
-  const m = /(.*?)で(攻撃|アタック|ヒール|回復|防御|ガード|強攻撃|全力)/.exec(t);
-  if (m){
-    const unit = input.manifest.units.find(u=>u.includes(m[1])) || input.manifest.units[0];
-    const acts = input.manifest.actionsByUnit[unit]||[];
-    const pick = (cs:string[])=> acts.find(a=>cs.some(c=>a.includes(c))) || acts[0];
-    const word = m[2];
-    const name = /攻撃|アタック/.test(word)? pick(["攻撃","アタック","attack"])
-               : /ヒール|回復/.test(word)? pick(["ヒール","回復","heal"])
-               : /防御|ガード/.test(word)? pick(["防御","ガード","defend"])
-               : pick(["強","強攻","power"]);
-    return { kind:"game", actions:[{type:"use_action", unit, action:name}] } as any;
-  }
+  // 2) 冒険者名＋攻撃／回復
+  //   例) 「リオで攻撃」「セイで強攻撃」「ルゥナで回復 トウマ」
+  const advNameRE = new RegExp("(" + advNames.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|") + ")");
+  const attackRE = new RegExp(advNameRE.source + "(?:で)?(攻撃|アタック|斬撃|殴る|突く|打つ|強攻撃)", "i");
+  const healRE   = new RegExp(advNameRE.source + "(?:で)?(回復|ヒール)(?:([\\wぁ-んァ-ヶ一-龥]+))?", "i");
 
-  // 「カード名→ユニット」（装備/サポート）
-  const arrow = /(.*?)[\s　]*→[\s　]*([^\s　]+)/.exec(t);
-  if (arrow){
-    const cardNameRaw = arrow[1].trim();
-    const target = arrow[2].trim();
-    const hand = input.manifest.hand || [];
-    const find = (n:string)=> hand.find(h=>h===n || h.includes(n));
-    const card = find(cardNameRaw);
-    if (card){
-      if (input.manifest.cardsByCategory.equipment.includes(card)){
-        return { kind:"game", actions:[{type:"equip", card, unit:target}] } as any;
-      }
-      if (input.manifest.cardsByCategory.support.includes(card)){
-        const mode = /(ボス|BOSS|魔王)/.test(t) ? "boss" : "adventurer";
-        return { kind:"game", actions:[{type:"play_support", card, mode, target}] } as any;
-      }
+  const mAtk = text.match(attackRE);
+  if (mAtk) {
+    const unit = mAtk[1];
+    const actName = pickAttackAction(unit);
+    if (actName) {
+      const actions: Action[] = [{ type: "use_action", unit, action: actName }];
+      return { kind: "game", actions, narration: `${unit}が『${actName}』！` };
     }
   }
 
-  // イベント：「◯◯ 使う/使用」
-  {
-    const m = /(.*?)(を?使う|使用)/.exec(t);
-    if (m){
-      const name = m[1].trim();
-      const hand = input.manifest.hand || [];
-      const card = hand.find(h => h===name || h.includes(name));
-      if (card && input.manifest.cardsByCategory.event.includes(card)){
-        return { kind:"game", actions:[{type:"play_event", card}] } as any;
-      }
+  const mHeal = text.match(healRE);
+  if (mHeal) {
+    const unit = mHeal[1];
+    const targetMaybe = mHeal[2];
+    const actName = pickHealAction(unit);
+    const target = advNames.find(n=>targetMaybe && normalize(n).includes(normalize(targetMaybe))) || undefined;
+    if (actName) {
+      const actions: Action[] = [{ type: "use_action", unit, action: actName, target }];
+      return { kind: "game", actions, narration: `${unit}が味方を回復。` };
     }
   }
 
-  // フィールド：「フィールド ◯◯ (ボス|冒険者)」
-  {
-    const m = /フィールド\s+([^\s]+)(?:\s+(ボス|冒険者|冒険者側|自軍|相手|敵))?/.exec(t);
-    if (m){
-      const name = m[1];
-      const side = /(ボス|相手|敵)/.test(m[2]||"") ? "boss" : "adventurer";
-      const hand = input.manifest.hand || [];
-      const card = hand.find(h => h===name || h.includes(name));
-      if (card && input.manifest.cardsByCategory.field.includes(card)){
-        return { kind:"game", actions:[{type:"play_field", card, side}] } as any;
-      }
+  // 3) サポートカードを使う
+  //   例) 「勇気のオーラをリオに」「魔力の加護をボスに」「古戦場をボス側に」
+  const supportOrFieldRE = new RegExp("(" + [...supportNames, ...(dataset as any).cards.fields.map((f:any)=>f.name)]
+    .map((n:string)=>n.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|") + ")");
+  const toWhoRE = new RegExp(supportOrFieldRE.source + "(?:を|を使って|を使う|を発動|貼る|設置)?(?:(?:を)?(" + advNameRE.source + ")に|ボスに|冒険者側に|ボス側に)?", "i");
+
+  const mSup = text.match(toWhoRE);
+  if (mSup) {
+    const card = mSup[1];
+    // フィールド？
+    const isField = (dataset as any).cards.fields.some((f:any)=>f.name===card);
+    if (isField) {
+      const side = /ボス側/.test(text) ? "boss" : "adventurer";
+      const actions: Action[] = [{ type:"play_field", card, side: side as any }];
+      return { kind:"game", actions, narration:`フィールド『${card}』を${side==="boss"?"ボス":"冒険者"}側に配置。` };
     }
+    // サポート（冒険者/ボスのどちらモードか判定）
+    const mode = /ボス/.test(text) ? "boss" : "adventurer";
+    const target = advNames.find(n=>text.includes(n));
+    const actions: Action[] = [{ type:"play_support", card, mode: mode as any, target }];
+    return { kind:"game", actions, narration:`サポート『${card}』を${mode==="boss"?"ボス":"冒険者"}用で使用。` };
   }
 
-  return { kind:"unknown", ask:"ゲーム指示か会話か、もう少し具体的にお願いなのだ" };
+  // 4) 装備
+  const equipRE = new RegExp("(" + equipNames.map((n:string)=>n.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|") + ").*?(" + advNameRE.source + ")", "i");
+  const mEq = text.match(equipRE);
+  if (mEq) {
+    const card = mEq[1]; const unit = mEq[2];
+    const actions: Action[] = [{ type:"equip", card, unit }];
+    return { kind:"game", actions, narration:`${unit}に装備『${card}』。` };
+  }
+
+  // 5) それ以外は会話扱い
+  //    ここではペルソナに噛み合う短文返答テンプレを返す（LLMがあればそちらを利用）。
+  const p = input.persona || "";
+  let reply = "なるほど。";
+  if (/勝気|挑発|強気/.test(p)) reply = "ふん、良い度胸だね。";
+  else if (/冷徹|皮肉|辛辣/.test(p)) reply = "皮肉は好物でね。";
+  else if (/礼儀|丁寧|穏やか/.test(p)) reply = "承知した。続けよう。";
+  return { kind: "chat", reply };
 }

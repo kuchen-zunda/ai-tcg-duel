@@ -26,14 +26,14 @@ const OPENAI_API_KEY = defineSecret("OPENAI_API_KEY");
 
 function toPublic(gs: GameState) {
   const c: any = JSON.parse(JSON.stringify(gs));
-  const hide = (s: any) => {
-    s.handCount = s.hand?.length ?? 0;
-    s.deckCount = s.deck?.length ?? 0;
-    delete s.hand;
-    delete s.deck;
-  };
-  hide(c.p1);
-  hide(c.p2);
+  // P1は手札を公開（ソロ想定）
+  c.p1.deckCount = c.p1.deck?.length ?? 0;
+  delete c.p1.deck;
+  // P2は手札/山札を隠す
+  c.p2.handCount = c.p2.hand?.length ?? 0;
+  c.p2.deckCount = c.p2.deck?.length ?? 0;
+  delete c.p2.hand;
+  delete c.p2.deck;
   return c;
 }
 
@@ -44,8 +44,19 @@ function summarizeState(gs: GameState): string {
 }
 
 export const startGameFn = onCall(async (req) => {
-  const b1 = (dataset as any).cards.bosses[0]?.name;
-  const b2 = (dataset as any).cards.bosses[1]?.name || b1;
+  const {
+    rulepack = "dualraid",
+    p1BossName,
+    p2BossName,
+    userPersona = "元気で礼儀正しい冒険者。短文中心。",
+    aiPersona = "勝気だが礼儀正しい剣士。短文で話す。",
+  } = (req.data || {}) as any;
+
+  if (rulepack !== "dualraid") throw new Error("rulepack_not_supported");
+
+  // ボス名が未指定ならデータセットの先頭2体を使用
+  const b1 = p1BossName || (dataset as any).cards.bosses[0]?.name;
+  const b2 = p2BossName || (dataset as any).cards.bosses[1]?.name || b1;
   if (!b1 || !b2) throw new Error("boss_dataset_missing");
 
   const seed = String(Date.now());
@@ -66,7 +77,10 @@ export const startGameFn = onCall(async (req) => {
     tx.set(refM, {
       p1_uid: uid,
       rulepack: "dualraid",
-      ai_persona: "勝気だが礼儀正しい剣士。短文で話す。",
+      user_persona: userPersona,
+      ai_persona: aiPersona,
+      p1_boss: b1,
+      p2_boss: b2,
       createdAt: Date.now(),
     });
     if (privRef) {
@@ -84,13 +98,12 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
   const { gameId, text } = req.data as { gameId: string; text: string };
   if (!gameId || !text) throw new Error("bad_request");
 
-  const uid = req.auth?.uid || "anon";
   const refI = db.doc(`games/${gameId}/internal/state`);
   const refP = db.doc(`games/${gameId}/public/state`);
   const refM = db.doc(`games/${gameId}/meta/info`);
   const chatCol = db.collection(`games/${gameId}/chat`);
 
-  await chatCol.add({ role: "user", uid, text, at: Date.now() });
+  await chatCol.add({ role: "user", text, at: Date.now() });
 
   try {
     const [pubSnap, metaSnap] = await Promise.all([
@@ -100,23 +113,15 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
     if (!pubSnap.exists) throw new Error("game_not_found");
     const pub = pubSnap.data() as GameState;
     const meta = metaSnap.data() || {};
-    const seat:"P1"|"P2" = "P1";
-    let privHand: string[] = [];
-    const p1_uid = (meta as any).p1_uid;
-    if (p1_uid) {
-      const privSnap = await db.doc(`games/${gameId}/private/${p1_uid}`).get();
-      privHand = (privSnap.data() as any)?.hand || [];
-    }
-    const manifest = await DualRaidAdapter.manifestForPrompt(pub, { mySeat: seat, myHand: privHand });
+    const manifest = await DualRaidAdapter.manifestForPrompt(pub, { mySeat: "P1", myHand: (pub as any).p1?.hand || [] });
     const stateSummary = summarizeState(pub);
-    const rulebookExcerpt = RULEBOOK;
 
     const result = await arbitrate({
       rulepack: "dualraid",
       persona: (meta as any).ai_persona || "勝気だが礼儀正しい剣士。短文。",
       stateSummary,
       manifest,
-      rulebookExcerpt,
+      rulebookExcerpt: RULEBOOK,
       userUtterance: text
     });
 
@@ -126,8 +131,6 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(refI);
         if (!snap.exists) throw new Error("game_not_found");
-        const metaSnap2 = await tx.get(refM);
-        const p1_uid2 = metaSnap2.exists ? (metaSnap2.data() as any).p1_uid : null;
 
         let gs = snap.data() as GameState;
         gs.log = gs.log || [];
@@ -138,14 +141,11 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
           after = applyIntent(after, "P1", a);
         }
         const active = (after as any).status ? (after as any).status === "active" : true;
-        // ← フェーズがプレイヤー手番("draw")の時だけ敵AIを動かす
-        shouldAIMove = (after.phase === "draw") && after.turn === "P2" && active;
+        // 手番がP2になったらAIを動かす（フェーズは問わない）
+        shouldAIMove = after.turn === "P2" && active;
 
         tx.set(refI, after);
         tx.set(refP, toPublic(after));
-        if (p1_uid2) {
-          tx.set(db.doc(`games/${gameId}/private/${p1_uid2}`), { hand: after.p1.hand, deckCount: after.p1.deck.length });
-        }
       });
 
       if ((result as any).narration) {
@@ -163,7 +163,7 @@ export const chatRouterFn = onCall({ secrets: [OPENAI_API_KEY] }, async (req) =>
         const snap = await tx.get(refI);
         if (!snap.exists) return;
         const gs = snap.data() as GameState;
-        const after = aiTakeTurn(gs, "P2");
+        const after = aiTakeTurn(gs, "P2"); // ← 相手AIが1手番実行
         tx.set(refI, after);
         tx.set(refP, toPublic(after));
       });

@@ -15,11 +15,8 @@ export function draw(gs:GameState, a:"P1"|"P2", n:number){
 }
 
 function startOfTurn(gs:GameState, a:"P1"|"P2"){
-  // AP +1（上限まで）
   for (const u of meOf(gs,a).adv) u.ap = Math.min(u.maxAp, u.ap + 1);
-  // 1ドロー
   draw(gs, a, 1);
-  // このターンのフラグ初期化
   meOf(gs,a).flags.supportUsedThisTurn = false;
 }
 
@@ -117,21 +114,17 @@ export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameSt
     case "play_event": {
       const idx = me.hand.indexOf(act.card); if (idx<0) throw new Error("card_not_in_hand");
       me.hand.splice(idx,1); me.discard.push(act.card);
-      // （簡易）イベント効果は今はログのみ
       gs.log.push({ t:"event", actor, card:act.card, at:Date.now() });
       break;
     }
 
     case "end_turn": {
-      // プレイヤーフェーズのみ終えられる（ボス中なら無視）
       if (gs.phase!=="draw") return gs;
 
       if (gs.turn === gs.roundStarter) {
-        // 先手の手番終了 → 後手の手番開始
         gs.turn = other(gs.turn);
         startOfTurn(gs, gs.turn);
       } else {
-        // 後手の手番終了 → ボスフェーズ（順は roundStarter → other(roundStarter)）
         gs.phase = "boss";
         const order:("P1"|"P2")[] = [gs.roundStarter, other(gs.roundStarter)];
         for (const side of order) {
@@ -141,7 +134,6 @@ export function applyIntent(gs: GameState, actor:"P1"|"P2", act: Action): GameSt
             gs.log.push({ t:"boss_roll", actor:side, boss: meSide.boss.name, die:res.die, action:res.action, val:res.value, targets:res.targets, at:Date.now() });
           }
         }
-        // 次ラウンド開始：先手交代 → プレイヤーフェーズ & 新先手の開始処理
         gs.roundStarter = other(gs.roundStarter);
         gs.turn = gs.roundStarter;
         gs.phase = "draw";
@@ -174,9 +166,7 @@ export function startGame(seed:string, boss1:string, boss2:string): GameState{
     rng:{ seed, rollNo:0 }, log:[],
     roundStarter: "P1",
   };
-  // 初期手札
   for (const s of [gs.p1, gs.p2]) { for (let i=0;i<3;i++){ const c=s.deck.shift(); if(c) s.hand.push(c); } }
-  // 先手開始処理
   startOfTurn(gs, "P1");
   return gs;
 }
