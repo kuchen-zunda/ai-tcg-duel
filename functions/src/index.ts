@@ -17,7 +17,7 @@ function pubSide(s:any){
   };
 }
 
-export const startGameFn = onCall({ secrets:["OPENAI_API_KEY"] }, async (req) => {
+export const startGameFn = onCall({ region: "asia-northeast1", secrets:["OPENAI_API_KEY"] }, async (req) => {
   const seed = String(Date.now());
   const aiPersona = req.data?.aiPersona || "皮肉屋で短文";
   const p2BossName = req.data?.p2BossName;
@@ -37,7 +37,7 @@ export const startGameFn = onCall({ secrets:["OPENAI_API_KEY"] }, async (req) =>
 });
 
 /* ユーザーの自然文を審判→アクション適用→必要なら相手手番へ */
-export const chatRouterFn = onCall({ secrets:["OPENAI_API_KEY"] }, async (req) => {
+export const chatRouterFn = onCall({ region: "asia-northeast1", secrets:["OPENAI_API_KEY"] }, async (req) => {
   const { gameId, text } = req.data||{};
   const gameRef = db.doc(`games/${gameId}`);
   const privRef = gameRef.collection("private").doc("state");
