@@ -1,138 +1,103 @@
-// functions/src/index.ts
-import { initializeApp } from "firebase-admin/app";
+import * as functions from "firebase-functions/v2";
 import { getFirestore } from "firebase-admin/firestore";
-import { onCall } from "firebase-functions/v2/https";
-import { setGlobalOptions } from "firebase-functions/v2/options";
-import { REGION } from "./config.js";
-
-import { arbitrate } from "./core/arbiter.js";
-import { planOpponentTurn } from "./ai/ai_llm.js";
-
-import dataset from "./rulepacks/dualraid/dataset.js";
-import { DualRaidAdapter } from "./rulepacks/dualraid/adapter.js";
-import { RULEBOOK } from "./rulepacks/dualraid/rulebook.js";
-import type { GameState, Action } from "./rulepacks/dualraid/engine/types.js";
 import { startGame, applyIntent } from "./rulepacks/dualraid/engine/reducer.js";
+import { DualRaidAdapter } from "./rulepacks/dualraid/adapter.js";
+import { routeNaturalLanguage, opponentPlan } from "./core/arbiter.js";
+import { onCall } from "firebase-functions/v2/https";
+import { initializeApp } from "firebase-admin/app";
 
-initializeApp();
-const db = getFirestore();
-db.settings({ ignoreUndefinedProperties: true });
-setGlobalOptions({ region: REGION });
+initializeApp();                // ← これで Admin SDK 初期化
+const db = getFirestore();      // ← Firestore 取得
 
-function toPublic(gs:GameState){
-  const c:any = JSON.parse(JSON.stringify(gs));
-  c.p1.deckCount = c.p1.deck?.length ?? 0; delete c.p1.deck;
-  c.p2.handCount = c.p2.hand?.length ?? 0; c.p2.deckCount = c.p2.deck?.length ?? 0;
-  delete c.p2.hand; delete c.p2.deck;
-  return c;
-}
-function summarize(gs:GameState){
-  const boss=(b:any)=>`${b.name} HP ${b.hp}/${b.maxHp}`;
-  const adv=(s:any)=>s.adv.map((a:any)=>`${a.name}[HP${a.hp}/${a.maxHp},AP${a.ap}/${a.maxAp}${(a.statuses||[]).includes("acted")?" acted":""}]`).join(", ");
-  return `Turn:${gs.turn} | P1 Boss:${boss(gs.p1.boss)} | P2 Boss:${boss(gs.p2.boss)} | P1: ${adv(gs.p1)} | P2: ${adv(gs.p2)} | P1 Hand: ${(gs as any).p1.hand?.join(", ")||""}`;
+function pubSide(s:any){
+  return {
+    boss:s.boss, adv:s.adv, discard:s.discard,
+    fieldAdv:s.fieldAdv, fieldBoss:s.fieldBoss,
+    handCount: (s.hand?.length||0), deckCount:(s.deck?.length||0),
+  };
 }
 
-export const startGameFn = onCall(async (req)=>{
-  const { p1BossName, p2BossName, aiPersona="皮肉屋で冷徹。短文。" } = (req.data||{}) as any;
+export const startGameFn = onCall({ secrets:["OPENAI_API_KEY"] }, async (req) => {
+  const seed = String(Date.now());
+  const aiPersona = req.data?.aiPersona || "皮肉屋で短文";
+  const p2BossName = req.data?.p2BossName;
 
-  const gs = startGame(String(Date.now()), p1BossName, p2BossName);
-  const gid = "g_" + Math.random().toString(36).slice(2,10);
+  const gs = startGame(seed, undefined, p2BossName);
+  const gameId = (await db.collection("games").add({
+    createdAt: Date.now(), aiPersona
+  })).id;
 
-  const refI = db.doc(`games/${gid}/internal/state`);
-  const refP = db.doc(`games/${gid}/public/state`);
-  const refM = db.doc(`games/${gid}/meta/info`);
-  const chatCol = db.collection(`games/${gid}/chat`);
-
-  await db.runTransaction(async(tx)=>{
-    tx.set(refI, gs);
-    tx.set(refP, toPublic(gs));
-    tx.set(refM, { rulepack:"dualraid", ai_persona: aiPersona, createdAt: Date.now() });
+  await db.doc(`games/${gameId}/private/state`).set(gs);
+  await db.doc(`games/${gameId}/public/state`).set({
+    ...gs, p1:pubSide(gs.p1), p2:pubSide(gs.p2)
   });
+  await db.collection(`games/${gameId}/chat`).add({ role:"system", text:"対戦を開始したのだ！", at:Date.now() });
 
-  await chatCol.add({ role:"system", text:"対戦を開始したのだ！", at:Date.now() });
-  await chatCol.add({ role:"opponent", text:"……負ける気はしないがね。", at:Date.now() });
-
-  return { ok:true, gameId: gid };
+  return { gameId };
 });
 
-export const chatRouterFn = onCall( async (req)=>{
-  const { gameId, text } = req.data as { gameId:string; text:string };
-  if (!gameId || !text) throw new Error("bad_request");
-
-  const refI = db.doc(`games/${gameId}/internal/state`);
-  const refP = db.doc(`games/${gameId}/public/state`);
-  const refM = db.doc(`games/${gameId}/meta/info`);
-  const chatCol = db.collection(`games/${gameId}/chat`);
+/* ユーザーの自然文を審判→アクション適用→必要なら相手手番へ */
+export const chatRouterFn = onCall({ secrets:["OPENAI_API_KEY"] }, async (req) => {
+  const { gameId, text } = req.data||{};
+  const gameRef = db.doc(`games/${gameId}`);
+  const privRef = gameRef.collection("private").doc("state");
+  const pubRef  = gameRef.collection("public").doc("state");
+  const chatCol = gameRef.collection("chat");
 
   await chatCol.add({ role:"user", text, at:Date.now() });
 
-  try{
-    const [pubSnap, metaSnap] = await Promise.all([ refP.get(), refM.get() ]);
-    if (!pubSnap.exists) throw new Error("game_not_found");
-    const pub = pubSnap.data() as GameState;
-    const meta:any = metaSnap.data() || {};
-    const persona = meta.ai_persona || "皮肉屋で冷徹。短文。";
+  await db.runTransaction(async tx=>{
+    const snap = await tx.get(privRef);
+    let gs:any = snap.data();
+    if (!gs) throw new Error("state_not_found");
 
-    const manifest = await DualRaidAdapter.manifestForPrompt(pub, { mySeat:"P1", myHand:(pub as any).p1?.hand||[] });
-    const summary = summarize(pub);
+    // 司会AIで解釈
+    const manifest = await DualRaidAdapter.manifestForPrompt(gs, { mySeat:"P1", myHand: gs.p1.hand||[] });
+    const parsed:any = await routeNaturalLanguage({ text, manifest });
 
-    // 1) 司会AIで自然文を判定→アクションJSON or 会話
-    const judged = await arbitrate({
-      rulepack:"dualraid",
-      persona,
-      manifest,
-      rulebookExcerpt: RULEBOOK,
-      stateSummary: summary,
-      userUtterance: text
-    });
-
-    let needOpponent = false;
-
-    if (judged.kind==="game" || judged.kind==="both"){
-      await db.runTransaction(async(tx)=>{
-        const snap = await tx.get(refI);
-        if (!snap.exists) throw new Error("game_not_found");
-        let gs = snap.data() as GameState;
-
-        for(const a of (judged as any).actions as Action[]){
-          gs = applyIntent(gs, "P1", a);
-        }
-        // P2手番になったらAI起動
-        needOpponent = gs.turn === "P2" && gs.status === "active";
-        tx.set(refI, gs);
-        tx.set(refP, toPublic(gs));
-      });
-
-      if ((judged as any).narration) {
-        await chatCol.add({ role:"system", text:(judged as any).narration, at:Date.now() });
-      }
-    }
-    if (judged.kind==="chat" || judged.kind==="both"){
-      // 会話だけの場合：ペルソナに沿った短文返答
-      const talk = (judged as any).reply || "ふん、続けよう。";
-      await chatCol.add({ role:"opponent", text: talk, at:Date.now() });
+    // 会話だけなら記録して終了
+    if ((!parsed.actions || parsed.actions.length===0) && parsed.chat){
+      tx.set(chatCol.doc(), { role:"opponent", text: parsed.chat, at: Date.now() });
+      return;
     }
 
-    // 2) 相手AIの手番（LLM計画）
-    if (needOpponent){
-      await db.runTransaction(async(tx)=>{
-        const snap = await tx.get(refI);
-        if (!snap.exists) return;
-        let gs = snap.data() as GameState;
-
-        const manifest2 = await DualRaidAdapter.manifestForPrompt(gs, { mySeat:"P2", myHand:[] });
-        const summary2 = summarize(gs);
-        const plan = await planOpponentTurn({ persona, manifest:manifest2, rulebook: RULEBOOK, stateSummary: summary2 });
-
-        for(const a of plan) gs = applyIntent(gs, "P2", a);
-        tx.set(refI, gs);
-        tx.set(refP, toPublic(gs));
-      });
+    // アクション適用（P1）
+    for (const a of (parsed.actions||[])) {
+      gs = applyIntent(gs, "P1", a);
+      if (gs.status!=="active") break;
     }
 
-    return { ok:true };
-  }catch(e:any){
-    await chatCol.add({ role:"system", text:`（サーバエラー）${e?.message||e}`, at:Date.now() });
-    return { ok:false, error:String(e?.message||e) };
-  }
+    tx.set(privRef, gs);
+    tx.set(pubRef, { ...gs, p1:pubSide(gs.p1), p2:pubSide(gs.p2) });
+  });
+
+  // ここから相手の自動手番（最大8ステップ安全装置）
+  await autoplayP2(gameId);
+  return { ok:true };
 });
+
+async function autoplayP2(gameId:string){
+  const gameRef = db.doc(`games/${gameId}`);
+  const privRef = gameRef.collection("private").doc("state");
+  const pubRef  = gameRef.collection("public").doc("state");
+  const chatCol = gameRef.collection("chat");
+
+  for (let step=0; step<8; step++){
+    const snap = await privRef.get(); let gs:any = snap.data();
+    if (!gs || gs.status!=="active" || gs.turn!=="P2") break;
+
+    const manifest = await DualRaidAdapter.manifestForPrompt(gs, { mySeat:"P2", myHand: gs.p2.hand||[] });
+    const plan:any = await opponentPlan({ gs, manifest });
+
+    if (plan.chat) { await chatCol.add({ role:"opponent", text: plan.chat, at: Date.now() }); }
+
+    const actions = (plan.actions && plan.actions.length>0) ? plan.actions : [{ type:"end_turn" }];
+    for (const a of actions){
+      gs = applyIntent(gs, "P2", a);
+      if (gs.status!=="active" || gs.turn!=="P2") break;
+    }
+
+    await privRef.set(gs);
+    await pubRef.set({ ...gs, p1:pubSide(gs.p1), p2:pubSide(gs.p2) });
+  }
+}

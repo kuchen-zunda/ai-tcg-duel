@@ -1,47 +1,81 @@
-*{box-sizing:border-box} body{margin:0;background:#f3f5f9;color:#0f172a;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5f9;color:#0f172a;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP","Hiragino Kaku Gothic ProN",Meiryo,sans-serif}
 .primary{background:#2563eb;color:#fff;border:none;padding:8px 14px;border-radius:8px;cursor:pointer}
-.page{max-width:1280px;margin:16px auto;display:grid;grid-template-columns:1fr 360px;gap:12px}
+.tiny{font-size:12px;padding:4px 8px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}
+.page{max-width:1320px;margin:16px auto;display:grid;grid-template-columns:1fr 360px;gap:12px}
 .left{display:flex;flex-direction:column;gap:10px}
-
 .panel{background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06)}
 .panel-title{font-weight:700;margin-bottom:6px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 .panel.grow{height:520px;display:flex;flex-direction:column}
 .timeline{overflow:auto;flex:1;display:flex;flex-direction:column;gap:6px}
 .line{font-size:14px}
 .big{font-size:16px;font-weight:700}.small{font-size:12px}.muted{color:#64748b}
 
-.input-row{display:flex;gap:8px}
+/* 入力欄を下に固定（sticky） */
+.input-row{position:sticky;bottom:8px;background:linear-gradient(180deg,rgba(243,245,249,1),rgba(243,245,249,0.6));padding-top:6px;display:flex;gap:8px}
 .input{flex:1;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px}
 
 /* ロビー */
 .lobby{max-width:980px;margin:24px auto;background:#fff;border-radius:14px;padding:16px;box-shadow:0 6px 16px rgba(0,0,0,.06)}
-.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.card{border:1px solid #cbd5e1;border-radius:12px;padding:10px;background:#fff}
-.card.sel{outline:2px solid #2563eb}
-.card-title{font-weight:700;margin-bottom:6px}
-.card-body .small{font-size:12px}
+.section-title{font-weight:700;margin:8px 0}
+.opps{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.opp{border:1px solid #cbd5e1;border-radius:12px;padding:10px;cursor:pointer;background:#fff}
+.opp.sel{outline:2px solid #2563eb}
+.opp-name{font-weight:700;margin-bottom:6px}
+.opp-sub{font-size:12px}.dim{color:#64748b}
 .center{display:flex;justify-content:center;margin-top:12px}
 
-/* 盤面グリッド（図の感じ） */
-.board-grid{background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);display:grid;grid-template-columns:160px repeat(6,1fr);grid-auto-rows:minmax(90px,auto);gap:8px}
-.char-stand{grid-column:1/2;border:1px dashed #cbd5e1;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#64748b}
+/* 盤面（図面に近い固定グリッド） */
+.arena{
+  background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);
+  display:grid;gap:8px;
+  grid-template-columns:160px repeat(5,112px) 160px;
+  grid-template-rows:120px 120px 120px 120px 120px;
+  grid-template-areas:
+    "bportrait bhands bhands bhands bhands bhands filler"
+    "bdeck     badv1  badv2  badv3  badv4  bboss  filler"
+    "bdiscard  badv1  badv2  badv3  badv4  bfboss filler"
+    "afadv     aadv1  aadv2  aadv3  aadv4  afboss filler"
+    "ahand     ahand  ahand  ahand  ahand  adeck  adiscard";
+}
+.filler{grid-area:filler}
 
-.pile{border:1px solid #cbd5e1;border-radius:10px;padding:6px;background:#f8fafc}
+/* 上段 */
+.b-portrait{grid-area:bportrait;border:1px dashed #cbd5e1;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:12px;color:#64748b}
+.b-hands{grid-area:bhands;display:flex;align-items:center;justify-content:flex-end}
+.b-deck{grid-area:bdeck}
+.b-discard{grid-area:bdiscard}
+
+.b-adv{border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;padding:6px}
+.b-adv.a1{grid-area:badv1}.b-adv.a2{grid-area:badv2}.b-adv.a3{grid-area:badv3}.b-adv.a4{grid-area:badv4}
+.b-boss{grid-area:bboss;border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:8px}
+.b-field-boss{grid-area:bfboss}
+.b-field-adv{grid-area:bfadv}
+
+/* 下段（A） */
+.a-field-adv{grid-area:afadv}
+.a-adv{border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:6px}
+.a-adv.a1{grid-area:aadv1}.a-adv.a2{grid-area:aadv2}.a-adv.a3{grid-area:aadv3}.a-adv.a4{grid-area:aadv4}
+.a-boss{grid-area:afboss;border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:8px}
+.a-field-boss{grid-area:afboss2}
+.a-deck{grid-area:adeck}
+.a-discard{grid-area:adiscard}
+.a-hand{grid-area:ahand;display:flex;align-items:center}
+
+/* パイル/カード */
 .pile-title{font-size:12px;color:#475569;margin-bottom:4px}
-.pile-body{display:flex;gap:6px;flex-wrap:wrap}
-.stack-count{font-size:12px;color:#334155}
+.stack{font-size:12px;color:#334155}
 .empty{font-size:12px;color:#94a3b8}
 
-.card{width:64px;height:88px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;text-align:center;padding:4px}
+.card{width:84px;height:112px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;text-align:center;padding:4px}
 .card.img{object-fit:cover}
-.card.back{background:#94a3b8;color:#fff}
+.card.back{background:#94a3b8}
 
-.adv-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
-.adv-cell{border:1px solid #cbd5e1;border-radius:10px;background:#fff;padding:6px}
-.adv-name{font-weight:600;font-size:13px}
-.adv-stat{font-size:12px;color:#475569}
-.equip-stack{font-size:11px;color:#0f766e;margin-top:2px}
-.boss-box{border:1px solid #cbd5e1;border-radius:8px;background:#fff;padding:6px;font-size:13px}
+/* 手札重ね */
+.hand-stack{position:relative;height:120px;display:flex;justify-content:flex-end;align-items:center}
+.hand-item{position:relative}
+.badge{position:absolute;right:-6px;top:-6px;background:#0ea5e9;color:#fff;border-radius:999px;font-size:12px;padding:2px 6px;border:2px solid #fff}
 
 /* 右ペイン */
-.right-pane{display:flex;flex-direction:column;gap:12px}
+.right{display:flex;flex-direction:column;gap:12px}
